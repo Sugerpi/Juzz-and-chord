@@ -63,9 +63,27 @@ namespace KinectUdpSender
         private readonly List<ulong> toRemove = new List<ulong>(MaxPlayers);
         private readonly StringBuilder jsonBuilder = new StringBuilder(1024);
 
+        // Windows-only ioctl that disables the WSAECONNRESET behavior on UDP sockets.
+        // Without this, when the receiver isn't listening, the OS surfaces the ICMP
+        // "port unreachable" as a SocketException on the NEXT Send(), which would
+        // otherwise propagate out of the FrameArrived handler and silently kill the
+        // reader thread.
+        private const int SIO_UDP_CONNRESET = -1744830452; // unchecked((int)0x9800000C)
+
         public KinectSender(string targetIp, int targetPort, bool printJsonToConsole)
         {
             udpClient = new UdpClient();
+            try
+            {
+                udpClient.Client.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+            }
+            catch (Exception ex)
+            {
+                // Non-Windows or unsupported — log and continue; the try/catch in
+                // OnBodyFrameArrived is the backup defense.
+                Console.WriteLine("Warning: could not disable SIO_UDP_CONNRESET: " + ex.Message);
+            }
+
             targetEndPoint = new IPEndPoint(IPAddress.Parse(targetIp), targetPort);
             this.printJsonToConsole = printJsonToConsole;
             consoleLogTimer.Start();
@@ -109,33 +127,59 @@ namespace KinectUdpSender
                 return;
             }
 
-            using (BodyFrame frame = e.FrameReference.AcquireFrame())
+            // CRITICAL: this entire method runs on a Kinect SDK background thread.
+            // Any exception that escapes here will tear down that thread and the
+            // FrameArrived event will never fire again — UDP traffic silently stops
+            // while the process keeps "running". Swallow everything and keep going.
+            try
             {
-                if (frame == null)
+                using (BodyFrame frame = e.FrameReference.AcquireFrame())
                 {
-                    return;
+                    if (frame == null)
+                    {
+                        return;
+                    }
+
+                    frame.GetAndRefreshBodyData(bodies);
+                    frameCount++;
+
+                    AssignSlots();
+
+                    string json = BuildJson();
+                    byte[] data = Encoding.UTF8.GetBytes(json);
+
+                    try
+                    {
+                        udpClient.Send(data, data.Length, targetEndPoint);
+                    }
+                    catch (SocketException sx)
+                    {
+                        // Transient: receiver gone, network change, etc. Drop this
+                        // frame and try again on the next one.
+                        if (consoleLogTimer.ElapsedMilliseconds >= 500)
+                        {
+                            Console.WriteLine("UDP send failed (frame=" + frameCount +
+                                              "): " + sx.SocketErrorCode + " " + sx.Message);
+                        }
+                    }
+
+                    if (printJsonToConsole && consoleLogTimer.ElapsedMilliseconds >= 500)
+                    {
+                        int trackedCount = 0;
+                        for (int i = 0; i < MaxPlayers; i++) if (slotBodies[i] != null) trackedCount++;
+                        Console.WriteLine(
+                            "frame=" + frameCount +
+                            " tracked=" + trackedCount + "/" + MaxPlayers +
+                            " bytes=" + data.Length +
+                            " json=" + json);
+                        consoleLogTimer.Restart();
+                    }
                 }
-
-                frame.GetAndRefreshBodyData(bodies);
-                frameCount++;
-
-                AssignSlots();
-
-                string json = BuildJson();
-                byte[] data = Encoding.UTF8.GetBytes(json);
-                udpClient.Send(data, data.Length, targetEndPoint);
-
-                if (printJsonToConsole && consoleLogTimer.ElapsedMilliseconds >= 500)
-                {
-                    int trackedCount = 0;
-                    for (int i = 0; i < MaxPlayers; i++) if (slotBodies[i] != null) trackedCount++;
-                    Console.WriteLine(
-                        "frame=" + frameCount +
-                        " tracked=" + trackedCount + "/" + MaxPlayers +
-                        " bytes=" + data.Length +
-                        " json=" + json);
-                    consoleLogTimer.Restart();
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Frame handler error (frame=" + frameCount +
+                                  "): " + ex.GetType().Name + " " + ex.Message);
             }
         }
 
