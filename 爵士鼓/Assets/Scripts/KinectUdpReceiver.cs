@@ -1,8 +1,7 @@
 using System;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
+using System.Runtime.InteropServices;
 using System.Threading;
 using UnityEngine;
 
@@ -15,10 +14,28 @@ using UnityEngine;
 ///
 /// 設計重點：這個 Receiver 不知道也不關心「誰是鼓手、誰是和弦手」，它只負責把資料攤平
 /// 給場景上的物件。角色分配在別處 (鼓的 Transform 通常綁 Player 0、和弦的 InputProvider 通常讀 Player 1)。
+///
+/// === Wire format ===
+/// 從 v1 起 Sender 改送固定長度 binary 封包 (219 bytes)，取代原本的 JSON。
+/// 完整規格寫在 <c>KinectUdpSender/KinectSender.cs</c> 上方。重點：
+///   - 4B magic "KINE" + 2B version + 1B playerCount + 4B seq + 8B tMs
+///   - 每位玩家 100 bytes：4B (slot/tracked/handLeftState/handRightState) +
+///     8 個關節 × (float x,y,z)
+/// 改 binary 的動機是 (a) 解掉每幀 JsonUtility.FromJson 造成的 GC 抖動，
+/// (b) 加上 seq/tMs 讓 timing 與掉包都可被觀察到。
 /// </summary>
 public class KinectUdpReceiver : MonoBehaviour
 {
     public const int MaxPlayers = 2;
+
+    // 必須跟 KinectSender 對齊。如果改 sender 的 wire format，記得這裡同步。
+    private const ushort WireVersion = 1;
+    private const int HeaderBytes = 4 + 2 + 1 + 4 + 8;          // 19
+    private const int JointsPerPlayer = 8;
+    private const int PerPlayerBytes = 4 + JointsPerPlayer * 3 * 4; // 100
+    private const int MaxPacketBytes = HeaderBytes + MaxPlayers * PerPlayerBytes; // 219
+    // UDP MTU 給點 headroom，避免之後 sender 增加欄位時 receiver 沒跟上就 truncate。
+    private const int RecvBufferBytes = 1500;
 
     [Header("UDP 設定")]
     [Tooltip("要跟 KinectUdpSender 的 --port 一致，預設 5052")]
@@ -49,6 +66,8 @@ public class KinectUdpReceiver : MonoBehaviour
 
     [Header("除錯")]
     public bool logIncoming = false;
+    [Tooltip("每秒印一次封包統計 (收到 / 消化 / 掉包 / 格式錯)")]
+    public bool logStats = false;
 
     [Header("Gizmo (Scene 視窗預覽)")]
     public bool drawGizmos = true;
@@ -64,10 +83,43 @@ public class KinectUdpReceiver : MonoBehaviour
     /// </summary>
     public PlayerData[] LatestData { get; private set; }
 
-    private UdpClient udpClient;
+    /// <summary>最近一個被主執行緒消化的封包的 sender 端 seq (uint32, 會 wrap)。</summary>
+    public uint LatestPacketSeq { get; private set; }
+    /// <summary>最近一個封包在 sender 端的 Stopwatch 時間 (ms)。用來做 timing-sensitive 對齊。</summary>
+    public long LatestPacketKinectTimeMs { get; private set; }
+
+    private Socket socket;
     private Thread receiveThread;
     private volatile bool running;
-    private readonly ConcurrentQueue<string> incoming = new ConcurrentQueue<string>();
+    private EndPoint anyEndPoint = new IPEndPoint(IPAddress.Any, 0);
+
+    // 三個固定 buffer：bg 收 → 主執行緒讀。零 allocation 在熱路徑上。
+    private readonly byte[] bgRecvBuffer = new byte[RecvBufferBytes];
+    private readonly byte[] consumeBuffer = new byte[RecvBufferBytes];
+    private readonly byte[] parseBuffer  = new byte[RecvBufferBytes];
+
+    // 0 = 沒有待消化的封包；非 0 = bg 寫過、主執行緒還沒拿走。
+    private int consumeLength;
+    private readonly object consumeLock = new object();
+
+    // bg 端紀錄。為了 cross-thread 讀寫安全用 Interlocked。
+    private long bgPacketsReceived;     // 通過格式檢查的封包數
+    private long bgInvalidPackets;      // 長度太短 / magic 錯 / version 錯
+    private long bgPacketsDropped;      // bg 看到的 seq gap (網路掉包)
+    private long bgOutOfOrderDiscarded; // seq <= 已收最大 (UDP 偶爾會亂序)
+    private uint bgLastReceivedSeq;     // bg 看過最大 seq (用來算 gap)
+    private bool bgHasLastSeq;
+
+    private long mainPacketsConsumed;
+    private float nextStatsLogTime;
+
+    // 解 binary 時用來把 4 bytes 重新組回 float 而不走 BitConverter 配置 byte[]。
+    [StructLayout(LayoutKind.Explicit)]
+    private struct FloatBits
+    {
+        [FieldOffset(0)] public float F;
+        [FieldOffset(0)] public uint U;
+    }
 
     // ---------- Inspector / public-data 型別 ----------
 
@@ -105,27 +157,6 @@ public class KinectUdpReceiver : MonoBehaviour
         public HandState handRightState = HandState.Unknown;
     }
 
-    // ---------- JSON 解析用的暫時型別 (對應 Sender 的輸出) ----------
-
-    [Serializable] private class JointVec { public float x; public float y; public float z; }
-
-    [Serializable]
-    private class PlayerJson
-    {
-        public int slot;
-        public bool tracked;
-        public JointVec handLeft, handRight, footLeft, footRight;
-        public JointVec shoulderLeft, shoulderRight, spineMid, spineBase;
-        public string handLeftState;
-        public string handRightState;
-    }
-
-    [Serializable]
-    private class Payload
-    {
-        public PlayerJson[] players;
-    }
-
     // ---------- 生命週期 ----------
 
     void Awake()
@@ -150,7 +181,16 @@ public class KinectUdpReceiver : MonoBehaviour
     {
         try
         {
-            udpClient = new UdpClient(port);
+            socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            socket.Bind(new IPEndPoint(IPAddress.Any, port));
+            // 預防 receiver 停掉時 Sender ICMP 反彈讓我們這邊 ReceiveFrom 拋例外。
+            // Windows-only ioctl，非 Windows 會 throw，吃掉就好。
+            try
+            {
+                const int SIO_UDP_CONNRESET = -1744830452;
+                socket.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+            }
+            catch (Exception) { /* 不是 Windows 沒差 */ }
         }
         catch (Exception e)
         {
@@ -159,50 +199,43 @@ public class KinectUdpReceiver : MonoBehaviour
         }
 
         running = true;
-        receiveThread = new Thread(ReceiveLoop) { IsBackground = true };
+        receiveThread = new Thread(ReceiveLoop) { IsBackground = true, Name = "KinectUdpReceiver" };
         receiveThread.Start();
 
-        Debug.Log("[KinectUdpReceiver] Listening on UDP " + port);
+        Debug.Log("[KinectUdpReceiver] Listening on UDP " + port + " (binary wire v" + WireVersion + ")");
     }
 
     void Update()
     {
-        // 把背景執行緒累積的封包全部消化掉，只用最新的一筆。
-        string latest = null;
-        string tmp;
-        while (incoming.TryDequeue(out tmp))
+        // 把 bg 累積的最新封包搬過來解析。一次只解一包 (最新)。
+        int len;
+        lock (consumeLock)
         {
-            latest = tmp;
+            if (consumeLength == 0)
+            {
+                MaybeLogStats();
+                return;
+            }
+            len = consumeLength;
+            Buffer.BlockCopy(consumeBuffer, 0, parseBuffer, 0, len);
+            consumeLength = 0;
         }
-        if (latest == null) return;
 
-        Payload p;
-        try
-        {
-            p = JsonUtility.FromJson<Payload>(latest);
-        }
-        catch (Exception e)
-        {
-            Debug.LogWarning("[KinectUdpReceiver] JSON 解析失敗: " + e.Message);
-            return;
-        }
-        if (p == null || p.players == null) return;
+        ParsePacket(parseBuffer, len);
+        mainPacketsConsumed++;
 
-        foreach (PlayerJson pj in p.players)
-        {
-            if (pj == null) continue;
-            if (pj.slot < 0 || pj.slot >= MaxPlayers) continue;
-            ApplyPlayer(pj);
-        }
+        MaybeLogStats();
     }
 
     void OnDisable()
     {
         running = false;
-        if (udpClient != null)
+        if (socket != null)
         {
-            udpClient.Close();
-            udpClient = null;
+            // Close() 會讓 ReceiveFrom 拋 SocketException / ObjectDisposedException，
+            // bg loop 看到就會結束。
+            try { socket.Close(); } catch { }
+            socket = null;
         }
         if (receiveThread != null && receiveThread.IsAlive)
         {
@@ -216,24 +249,68 @@ public class KinectUdpReceiver : MonoBehaviour
         OnDisable();
     }
 
-    // ---------- 解析後處理 ----------
+    // ---------- 主執行緒：binary 封包 → PlayerData ----------
 
-    private void ApplyPlayer(PlayerJson pj)
+    private void ParsePacket(byte[] buf, int len)
     {
-        PlayerData data = LatestData[pj.slot];
-        data.tracked = pj.tracked;
-        data.handLeftState = ParseHandState(pj.handLeftState);
-        data.handRightState = ParseHandState(pj.handRightState);
+        // 格式檢查理論上 bg 已經做過一次了，但便宜，這裡再做一次更安全。
+        if (len < HeaderBytes) return;
+        if (buf[0] != (byte)'K' || buf[1] != (byte)'I' || buf[2] != (byte)'N' || buf[3] != (byte)'E') return;
+        ushort version = (ushort)(buf[4] | (buf[5] << 8));
+        if (version != WireVersion) return;
 
-        // 更新資料 + 推到 Transform (兩個都做，這樣 chord 端 polling 也能拿到值)
-        data.handLeft      = UpdateJoint(GetTf(pj.slot, t => t.handLeft),      pj.handLeft,      data.handLeft);
-        data.handRight     = UpdateJoint(GetTf(pj.slot, t => t.handRight),     pj.handRight,     data.handRight);
-        data.footLeft      = UpdateJoint(GetTf(pj.slot, t => t.footLeft),      pj.footLeft,      data.footLeft);
-        data.footRight     = UpdateJoint(GetTf(pj.slot, t => t.footRight),     pj.footRight,     data.footRight);
-        data.shoulderLeft  = UpdateJoint(GetTf(pj.slot, t => t.shoulderLeft),  pj.shoulderLeft,  data.shoulderLeft);
-        data.shoulderRight = UpdateJoint(GetTf(pj.slot, t => t.shoulderRight), pj.shoulderRight, data.shoulderRight);
-        data.spineMid      = UpdateJoint(GetTf(pj.slot, t => t.spineMid),      pj.spineMid,      data.spineMid);
-        data.spineBase     = UpdateJoint(GetTf(pj.slot, t => t.spineBase),     pj.spineBase,     data.spineBase);
+        int playerCount = buf[6];
+        uint seq = ReadU32(buf, 7);
+        ulong tMs = ReadU64(buf, 11);
+
+        LatestPacketSeq = seq;
+        LatestPacketKinectTimeMs = (long)tMs;
+
+        int off = HeaderBytes;
+        for (int i = 0; i < playerCount; i++)
+        {
+            if (off + PerPlayerBytes > len) return;
+
+            int slot = buf[off + 0];
+            bool tracked = buf[off + 1] != 0;
+            HandState hlState = MapWireHandState(buf[off + 2]);
+            HandState hrState = MapWireHandState(buf[off + 3]);
+
+            if (slot < 0 || slot >= MaxPlayers)
+            {
+                off += PerPlayerBytes;
+                continue;
+            }
+
+            int jointOff = off + 4;
+            ApplyPlayer(slot, tracked, hlState, hrState, buf, jointOff);
+            off += PerPlayerBytes;
+        }
+
+        if (logIncoming)
+        {
+            Debug.Log($"[KinectUdpReceiver] seq={seq} tMs={tMs} players={playerCount}");
+        }
+    }
+
+    private void ApplyPlayer(int slot, bool tracked, HandState hlState, HandState hrState,
+                              byte[] buf, int jointOff)
+    {
+        PlayerData data = LatestData[slot];
+        data.tracked = tracked;
+        data.handLeftState = hlState;
+        data.handRightState = hrState;
+
+        // Joint 順序固定 (跟 sender 對齊)：
+        //   HL, HR, FL, FR, ShL, ShR, SpM, SpB
+        data.handLeft      = UpdateJoint(GetTf(slot, t => t.handLeft),      buf, jointOff +  0, data.handLeft);
+        data.handRight     = UpdateJoint(GetTf(slot, t => t.handRight),     buf, jointOff + 12, data.handRight);
+        data.footLeft      = UpdateJoint(GetTf(slot, t => t.footLeft),      buf, jointOff + 24, data.footLeft);
+        data.footRight    = UpdateJoint(GetTf(slot, t => t.footRight),     buf, jointOff + 36, data.footRight);
+        data.shoulderLeft  = UpdateJoint(GetTf(slot, t => t.shoulderLeft),  buf, jointOff + 48, data.shoulderLeft);
+        data.shoulderRight = UpdateJoint(GetTf(slot, t => t.shoulderRight), buf, jointOff + 60, data.shoulderRight);
+        data.spineMid      = UpdateJoint(GetTf(slot, t => t.spineMid),      buf, jointOff + 72, data.spineMid);
+        data.spineBase     = UpdateJoint(GetTf(slot, t => t.spineBase),     buf, jointOff + 84, data.spineBase);
     }
 
     private Transform GetTf(int slot, Func<PlayerTransforms, Transform> picker)
@@ -245,13 +322,16 @@ public class KinectUdpReceiver : MonoBehaviour
     /// <summary>
     /// 把一個關節資料 (a) 寫到 Transform (如果有指派)、(b) 回傳轉換後的世界座標 (給 LatestData 存)。
     /// </summary>
-    private Vector3 UpdateJoint(Transform target, JointVec j, Vector3 previousValue)
+    private Vector3 UpdateJoint(Transform target, byte[] buf, int off, Vector3 previousValue)
     {
-        if (j == null) return previousValue;
-        // Sender 對未追到的關節送 (0,0,0)，這裡保留上一個值避免肢體跳到原點。
-        if (j.x == 0f && j.y == 0f && j.z == 0f) return previousValue;
+        float jx = ReadFloat(buf, off + 0);
+        float jy = ReadFloat(buf, off + 4);
+        float jz = ReadFloat(buf, off + 8);
 
-        Vector3 desired = KinectToUnity(j);
+        // Sender 對未追到的關節送 (0,0,0)，這裡保留上一個值避免肢體跳到原點。
+        if (jx == 0f && jy == 0f && jz == 0f) return previousValue;
+
+        Vector3 desired = KinectToUnity(jx, jy, jz);
         Vector3 next;
         if (target == null)
         {
@@ -276,41 +356,49 @@ public class KinectUdpReceiver : MonoBehaviour
         return next;
     }
 
-    private Vector3 KinectToUnity(JointVec j)
+    private Vector3 KinectToUnity(float kx, float ky, float kz)
     {
-        float x = flipX ? -j.x : j.x;
-        float z = flipZ ? -j.z : j.z;
-        return new Vector3(x, j.y, z) * scale + worldOffset;
+        float x = flipX ? -kx : kx;
+        float z = flipZ ? -kz : kz;
+        return new Vector3(x, ky, z) * scale + worldOffset;
     }
 
-    private static HandState ParseHandState(string s)
+    private static HandState MapWireHandState(byte b)
     {
-        if (string.IsNullOrEmpty(s)) return HandState.Unknown;
-        // Microsoft.Kinect.HandState 字面值: Unknown / NotTracked / Open / Closed / Lasso
-        HandState result;
-        return Enum.TryParse(s, true, out result) ? result : HandState.Unknown;
+        // Microsoft.Kinect.HandState 數值: Unknown=0, NotTracked=1, Open=2, Closed=3, Lasso=4
+        // 本地 enum 順序不同，所以這裡手動 map。
+        switch (b)
+        {
+            case 0: return HandState.Unknown;
+            case 1: return HandState.NotTracked;
+            case 2: return HandState.Open;
+            case 3: return HandState.Closed;
+            case 4: return HandState.Lasso;
+            default: return HandState.Unknown;
+        }
     }
 
     // ---------- 背景 UDP 收信 ----------
 
     private void ReceiveLoop()
     {
-        IPEndPoint anyEndpoint = new IPEndPoint(IPAddress.Any, 0);
+        // 本地捕獲 socket reference，避免 OnDisable 把 field 設成 null 之後
+        // 這裡 NRE。Close 由 main thread 觸發，下面 ReceiveFrom 就會丟例外，
+        // 我們 catch 後 running 也已經是 false，正常退出。
+        Socket localSocket = socket;
+        EndPoint ep = anyEndPoint;
         while (running)
         {
+            int n;
             try
             {
-                byte[] data = udpClient.Receive(ref anyEndpoint);
-                string json = Encoding.UTF8.GetString(data);
-                if (logIncoming)
-                {
-                    Debug.Log("[KinectUdpReceiver] recv: " + json);
-                }
-                incoming.Enqueue(json);
+                n = localSocket.ReceiveFrom(bgRecvBuffer, 0, bgRecvBuffer.Length, SocketFlags.None, ref ep);
             }
             catch (SocketException)
             {
-                // 關閉 UdpClient 時會丟，忽略
+                // 關閉時會丟，忽略；running 變 false 後迴圈會退。
+                if (!running) return;
+                continue;
             }
             catch (ObjectDisposedException)
             {
@@ -319,8 +407,98 @@ public class KinectUdpReceiver : MonoBehaviour
             catch (Exception e)
             {
                 Debug.LogWarning("[KinectUdpReceiver] receive error: " + e.Message);
+                continue;
+            }
+
+            // 在 bg thread 上先做基本驗證 + seq 排序，主執行緒只看到「對的、最新的」。
+            if (n < HeaderBytes)
+            {
+                Interlocked.Increment(ref bgInvalidPackets);
+                continue;
+            }
+            if (bgRecvBuffer[0] != (byte)'K' || bgRecvBuffer[1] != (byte)'I' ||
+                bgRecvBuffer[2] != (byte)'N' || bgRecvBuffer[3] != (byte)'E')
+            {
+                Interlocked.Increment(ref bgInvalidPackets);
+                continue;
+            }
+            ushort version = (ushort)(bgRecvBuffer[4] | (bgRecvBuffer[5] << 8));
+            if (version != WireVersion)
+            {
+                Interlocked.Increment(ref bgInvalidPackets);
+                continue;
+            }
+
+            uint seq = ReadU32(bgRecvBuffer, 7);
+
+            if (bgHasLastSeq)
+            {
+                // 用 unchecked signed diff 處理 uint32 wrap：
+                //   diff > 0  → 新 (可能有 gap)
+                //   diff <= 0 → 舊或重複，丟掉
+                int diff = unchecked((int)(seq - bgLastReceivedSeq));
+                if (diff <= 0)
+                {
+                    Interlocked.Increment(ref bgOutOfOrderDiscarded);
+                    continue;
+                }
+                if (diff > 1)
+                {
+                    Interlocked.Add(ref bgPacketsDropped, diff - 1);
+                }
+            }
+            else
+            {
+                bgHasLastSeq = true;
+            }
+            bgLastReceivedSeq = seq;
+            Interlocked.Increment(ref bgPacketsReceived);
+
+            // 寫到主執行緒會 pick 的 buffer。前一個還沒被 consume 的就直接覆蓋
+            // (我們的策略就是「主執行緒只在乎最新」)。
+            lock (consumeLock)
+            {
+                Buffer.BlockCopy(bgRecvBuffer, 0, consumeBuffer, 0, n);
+                consumeLength = n;
             }
         }
+    }
+
+    private void MaybeLogStats()
+    {
+        if (!logStats) return;
+        if (Time.unscaledTime < nextStatsLogTime) return;
+        nextStatsLogTime = Time.unscaledTime + 1f;
+
+        Debug.Log(
+            $"[KinectUdpReceiver] recv={Interlocked.Read(ref bgPacketsReceived)} " +
+            $"consumed={mainPacketsConsumed} " +
+            $"netDropped={Interlocked.Read(ref bgPacketsDropped)} " +
+            $"outOfOrder={Interlocked.Read(ref bgOutOfOrderDiscarded)} " +
+            $"invalid={Interlocked.Read(ref bgInvalidPackets)} " +
+            $"lastSeq={LatestPacketSeq} lastTMs={LatestPacketKinectTimeMs}");
+    }
+
+    // ---------- Binary 解析小工具 ----------
+
+    private static uint ReadU32(byte[] b, int off)
+    {
+        return (uint)(b[off + 0] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24));
+    }
+
+    private static ulong ReadU64(byte[] b, int off)
+    {
+        ulong lo = ReadU32(b, off);
+        ulong hi = ReadU32(b, off + 4);
+        return lo | (hi << 32);
+    }
+
+    private static float ReadFloat(byte[] b, int off)
+    {
+        FloatBits fb;
+        fb.F = 0f;
+        fb.U = (uint)(b[off + 0] | (b[off + 1] << 8) | (b[off + 2] << 16) | (b[off + 3] << 24));
+        return fb.F;
     }
 
     // ---------- Scene Gizmo (調 offset 用) ----------

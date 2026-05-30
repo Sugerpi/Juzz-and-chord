@@ -29,6 +29,11 @@ namespace ChordPlayer.Kinect
         [Tooltip("讀哪個玩家。0 = 第一個被追到的人 (通常是鼓手)、1 = 第二個 (通常是和弦手)。")]
         [SerializeField, Range(0, 1)] int _playerIndex = 1;
 
+        [Header("Yielding to SimulatedInputProvider")]
+        [Tooltip("收不到封包超過這秒數就讓位給 SimulatedInputProvider — " +
+                 "讓你在 Editor 裡用滑鼠測試時 receiver 還在場景上也不會卡住輪盤。")]
+        [SerializeField, Min(0.1f)] float _staleTimeout = 1.0f;
+
         [Header("Debug")]
         [SerializeField] bool _logToConsole = false;
         [SerializeField, Min(0.1f)] float _logInterval = 1.0f;
@@ -36,6 +41,9 @@ namespace ChordPlayer.Kinect
         BodyData _body = BodyData.Empty;
         float _nextLogTime;
         bool _registered;
+        uint _lastSeenSeq;
+        float _lastSeqChangeTime;
+        bool _hasSeenAnySeq;
 
         public BodyData Body => _body;
         public int PlayerIndex => _playerIndex;
@@ -60,6 +68,26 @@ namespace ChordPlayer.Kinect
                 // No UDP data source available — step aside so another provider
                 // (e.g. SimulatedInputProvider in chord-only test) can drive
                 // ChordEngine via ServiceLocator.
+                UnregisterIfMine();
+                _body.IsTracked = false;
+                return;
+            }
+
+            // Receiver 物件在場景上 ≠ 真的在收封包。當 chord 場景被 additive 載到
+            // 鼓主場景時，receiver 永遠存在；但如果 sender 沒開，LatestPacketSeq 永遠
+            // 是 0、或停在某個值不動。我們追蹤 seq 變化時間：超過 _staleTimeout 沒動，
+            // 就讓位給 SimulatedInputProvider，這樣 Editor mouse-test 才能用。
+            uint seqNow = _receiver.LatestPacketSeq;
+            if (!_hasSeenAnySeq || seqNow != _lastSeenSeq)
+            {
+                _hasSeenAnySeq = true;
+                _lastSeenSeq = seqNow;
+                _lastSeqChangeTime = Time.unscaledTime;
+            }
+            bool dataFlowing = _hasSeenAnySeq && seqNow != 0 &&
+                               (Time.unscaledTime - _lastSeqChangeTime) <= _staleTimeout;
+            if (!dataFlowing)
+            {
                 UnregisterIfMine();
                 _body.IsTracked = false;
                 return;

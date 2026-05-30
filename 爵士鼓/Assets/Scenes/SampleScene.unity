@@ -167,8 +167,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 0, g: 0, b: 1, a: 1}
   flashDuration: 0.2
   alternateClip: {fileID: 0}
@@ -380,7 +380,7 @@ Transform:
   m_GameObject: {fileID: 152472423}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0.75, y: 0.5, z: -0.3}
+  m_LocalPosition: {x: 0.65, y: 0.5, z: -0.3}
   m_LocalScale: {x: 0.4, y: 0.2, z: 0.4}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -398,8 +398,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 0.1, g: 0.1, b: 0.1, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 0}
@@ -594,6 +594,7 @@ GameObject:
   - component: {fileID: 154708174}
   - component: {fileID: 154708173}
   - component: {fileID: 154708172}
+  - component: {fileID: 154708177}
   m_Layer: 0
   m_Name: RightfootLimb
   m_TagString: PlayerLimb
@@ -721,6 +722,21 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &154708177
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 154708171}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0b286827458478d45a40179f8db8d4f9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::KinectLimb
+  receiver: {fileID: 1646530232}
+  playerIndex: 0
+  kind: 3
 --- !u!1 &196031942
 GameObject:
   m_ObjectHideFlags: 0
@@ -818,8 +834,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 0, g: 1, b: 1, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 0}
@@ -1151,6 +1167,7 @@ GameObject:
   - component: {fileID: 383554930}
   - component: {fileID: 383554929}
   - component: {fileID: 383554928}
+  - component: {fileID: 383554933}
   m_Layer: 0
   m_Name: 'LeftfootLimb '
   m_TagString: PlayerLimb
@@ -1278,6 +1295,21 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &383554933
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 383554927}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0b286827458478d45a40179f8db8d4f9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::KinectLimb
+  receiver: {fileID: 1646530232}
+  playerIndex: 0
+  kind: 2
 --- !u!1 &410087039
 GameObject:
   m_ObjectHideFlags: 0
@@ -1453,8 +1485,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 0.6980392, g: 0.1333333, b: 0.1333333, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 0}
@@ -1724,8 +1756,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 0.254902, g: 0.4117647, b: 0.882353, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 0}
@@ -1920,6 +1952,7 @@ GameObject:
   - component: {fileID: 781620577}
   - component: {fileID: 781620576}
   - component: {fileID: 781620575}
+  - component: {fileID: 781620580}
   m_Layer: 0
   m_Name: LeftHandLimb
   m_TagString: PlayerLimb
@@ -2047,6 +2080,21 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &781620580
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 781620574}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0b286827458478d45a40179f8db8d4f9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::KinectLimb
+  receiver: {fileID: 1646530232}
+  playerIndex: 0
+  kind: 0
 --- !u!1 &798558855
 GameObject:
   m_ObjectHideFlags: 0
@@ -2239,8 +2287,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 1, g: 0.92156863, b: 0.015686275, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 0}
@@ -2452,7 +2500,7 @@ Transform:
   m_GameObject: {fileID: 1242658436}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: -1, y: 0.82, z: -0.3}
+  m_LocalPosition: {x: -0.9, y: 0.92, z: -0.5}
   m_LocalScale: {x: 0.32, y: 0.012, z: 0.32}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -2470,8 +2518,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 1, g: 0.5490196, b: 0, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 8300000, guid: 5cd5d4d5e4bd12b45b0724ae33013d88, type: 3}
@@ -2867,6 +2915,7 @@ MonoBehaviour:
   flipZ: 1
   smoothing: 15
   logIncoming: 1
+  logStats: 0
   drawGizmos: 1
   kinectNearMeters: 0.5
   kinectFarMeters: 4.5
@@ -2955,6 +3004,7 @@ GameObject:
   - component: {fileID: 1927224480}
   - component: {fileID: 1927224479}
   - component: {fileID: 1927224478}
+  - component: {fileID: 1927224483}
   m_Layer: 0
   m_Name: RightHandLimb
   m_TagString: PlayerLimb
@@ -3082,6 +3132,21 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1927224483
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1927224477}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 0b286827458478d45a40179f8db8d4f9, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::KinectLimb
+  receiver: {fileID: 1646530232}
+  playerIndex: 0
+  kind: 1
 --- !u!1 &2036912177
 GameObject:
   m_ObjectHideFlags: 0
@@ -3130,8 +3195,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4836265d05e4e4c4b9e5b8e14212fa7e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VirtualDrum
-  hitVelocityThreshold: 1.2
   cooldownTime: 0.08
+  legacyHitVelocityThreshold: 1.2
   hitColor: {r: 0.5803922, g: 0, b: 0.8274511, a: 1}
   flashDuration: 0.1
   alternateClip: {fileID: 0}
