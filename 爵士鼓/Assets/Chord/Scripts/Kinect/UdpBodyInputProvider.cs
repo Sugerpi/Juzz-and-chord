@@ -29,6 +29,21 @@ namespace ChordPlayer.Kinect
         [Tooltip("讀哪個玩家。0 = 第一個被追到的人 (通常是鼓手)、1 = 第二個 (通常是和弦手)。")]
         [SerializeField, Range(0, 1)] int _playerIndex = 1;
 
+        [Header("Anchor to Wheels (推薦：跟鼓一樣的相對定位)")]
+        [Tooltip("打開後，會強制把肩膀「貼」在輪盤中心，手位置 = 輪盤中心 + (Kinect 手 - Kinect 肩)。" +
+                 "玩家就不必站在特定 Unity 世界座標，伸手揮動就掃 segment。")]
+        [SerializeField] bool _anchorToWheels = true;
+
+        [Tooltip("左輪盤的 Transform (Root wheel)。會被當作左肩 anchor，左手的相對位移會以此為原點。")]
+        [SerializeField] Transform _leftWheelAnchor;
+
+        [Tooltip("右輪盤的 Transform (Quality wheel)。同理。")]
+        [SerializeField] Transform _rightWheelAnchor;
+
+        [Tooltip("Kinect 公尺 → 輪盤平面尺寸的放大倍率。 1 = 一公尺對一單位 (Kinect 原尺度)。" +
+                 "輪盤外徑 0.6 的話建議 1.5~2.0：揮手伸到約 0.3-0.4m 就能掃到外圈邊緣。")]
+        [SerializeField, Min(0.1f)] float _armScale = 1.7f;
+
         [Header("Yielding to SimulatedInputProvider")]
         [Tooltip("收不到封包超過這秒數就讓位給 SimulatedInputProvider — " +
                  "讓你在 Editor 裡用滑鼠測試時 receiver 還在場景上也不會卡住輪盤。")]
@@ -110,15 +125,45 @@ namespace ChordPlayer.Kinect
             }
 
             _body.IsTracked       = data.tracked;
-            _body.LeftHand        = data.handLeft;
-            _body.RightHand       = data.handRight;
-            _body.SpineMid        = data.spineMid;
-            _body.SpineBase       = data.spineBase;
-            _body.ShoulderLeft    = data.shoulderLeft;
-            _body.ShoulderRight   = data.shoulderRight;
-
             _body.LeftHandState   = MapHand(data.handLeftState);
             _body.RightHandState  = MapHand(data.handRightState);
+
+            // ============== Anchor-to-Wheels 模式 ==============
+            // 玩家在 Unity 世界的絕對位置 (站哪、距 Kinect 多遠) 都丟掉。只看「手相對肩
+            // 膀的位移」，然後把肩膀強制貼在輪盤中心，所以手就會以輪盤中心為原點掃過去。
+            // 等於 ChordEngine 看到的「肩膀」永遠 = 輪盤中心，揮手就直接是 hand offset
+            // = 選擇用的 angle/radius。這跟鼓組「手到 trigger collider 的世界距離」邏
+            // 輯類似 — 都是用相對位移而不是絕對座標。
+            if (_anchorToWheels && data.tracked &&
+                _leftWheelAnchor != null && _rightWheelAnchor != null)
+            {
+                Vector3 leftAnchor  = _leftWheelAnchor.position;
+                Vector3 rightAnchor = _rightWheelAnchor.position;
+
+                Vector3 leftArm  = (data.handLeft  - data.shoulderLeft)  * _armScale;
+                Vector3 rightArm = (data.handRight - data.shoulderRight) * _armScale;
+
+                _body.ShoulderLeft  = leftAnchor;
+                _body.ShoulderRight = rightAnchor;
+                _body.LeftHand      = leftAnchor  + leftArm;
+                _body.RightHand     = rightAnchor + rightArm;
+
+                // SpineMid/SpineBase 拿不到肩膀基準時也補一下，避免 HandPointer 那些
+                // 共用 shoulderWidth 的工具拿到 0。
+                _body.SpineMid  = (leftAnchor + rightAnchor) * 0.5f;
+                _body.SpineBase = _body.SpineMid + Vector3.down * 0.3f;
+            }
+            else
+            {
+                // 直送模式：保留原本「絕對世界座標」邏輯。如果想要校準位置才能玩，
+                // 或想用 SkeletonView 看完整骨架，用這個。
+                _body.LeftHand        = data.handLeft;
+                _body.RightHand       = data.handRight;
+                _body.SpineMid        = data.spineMid;
+                _body.SpineBase       = data.spineBase;
+                _body.ShoulderLeft    = data.shoulderLeft;
+                _body.ShoulderRight   = data.shoulderRight;
+            }
 
             // chord 的 BodyData 期待 per-hand tracked 旗標。UDP 來源沒有獨立追蹤
             // 每隻手的位置 (只有整個身體 + hand state)，所以這裡用「身體有追到 且
