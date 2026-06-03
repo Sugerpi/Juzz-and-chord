@@ -28,6 +28,10 @@ public class VirtualDrum : MonoBehaviour
     [Tooltip("防連點的冷卻時間 (秒)")]
     public float cooldownTime = 0.08f;
 
+    [Tooltip("肢體碰到鼓本體的 trigger collider 就觸發。大鼓改用獨立踏板時請取消勾選 — " +
+             "鼓還是會播音 + 閃光，只是只能由 BassDrumPedal 透過 TriggerHitExternally() 觸發。")]
+    public bool triggerOnTouch = true;
+
     [Header("Fallback：沒掛 KinectLimb 時用的速度判定")]
     [Tooltip("collider 沒有 KinectLimb 元件時的回退門檻。手部/腳部向下速度 (m/s)。" +
              "正常情況不會走到這條路。")]
@@ -76,6 +80,7 @@ public class VirtualDrum : MonoBehaviour
 
     void OnTriggerEnter(Collider other)
     {
+        if (!triggerOnTouch) return;
         if (!other.CompareTag("PlayerLimb")) return;
 
         KinectLimb limb = other.GetComponent<KinectLimb>();
@@ -103,6 +108,7 @@ public class VirtualDrum : MonoBehaviour
 
     void OnTriggerStay(Collider other)
     {
+        if (!triggerOnTouch) return;
         if (!other.CompareTag("PlayerLimb")) return;
 
         KinectLimb limb = other.GetComponent<KinectLimb>();
@@ -145,6 +151,15 @@ public class VirtualDrum : MonoBehaviour
     private bool CanHit()
     {
         return Time.time >= (lastHitTime + cooldownTime);
+    }
+
+    /// <summary>
+    /// 給外部腳本 (例如 BassDrumPedal) 呼叫的觸發入口。沿用同一條 cooldown，
+    /// 所以連續呼叫不會穿過防連點保護。
+    /// </summary>
+    public void TriggerHitExternally()
+    {
+        if (CanHit()) HitDrum();
     }
 
     // --- 觸發打擊的執行動作 ---
